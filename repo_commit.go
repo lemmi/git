@@ -11,8 +11,11 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+)
 
-	"github.com/Unknwon/com"
+const (
+	ItemsPerPage   = 50
+	ItemsPerSearch = 100
 )
 
 var (
@@ -150,20 +153,51 @@ func (repo *Repository) CommitsCount(commitId string) (int, error) {
 }
 
 func (repo *Repository) FileCommitsCount(branch, file string) (int, error) {
-	stdout, stderr, err := com.ExecCmdDir(repo.Path, "git", "rev-list", "--count",
-		branch, "--", file)
+	strId, err := repo.GetCommitIdOfBranch(branch)
 	if err != nil {
-		return 0, errors.New(stderr)
+		return 0, err
 	}
-	return StrToInt(strings.TrimSpace(stdout))
+
+	id, err := NewIdFromString(strId)
+	if err != nil {
+		return 0, err
+	}
+
+	return repo.fileCommitsCount(id, file)
 }
 
 func (repo *Repository) commitsCount(id sha1) (int, error) {
-	stdout, stderr, err := com.ExecCmdDir(repo.Path, "git", "rev-list", "--count", id.String())
+	commit, err := repo.getCommit(id)
 	if err != nil {
-		return 0, errors.New(stderr)
+		return 0, err
 	}
-	return StrToInt(strings.TrimSpace(stdout))
+
+	counter, getter := makeCounter(nil)
+
+	_, err = walkHistory(commit, counter)
+	if err != nil {
+		return 0, err
+	}
+
+	return getter(), nil
+}
+
+func (repo *Repository) fileCommitsCount(id sha1, file string) (int, error) {
+	commit, err := repo.getCommit(id)
+	if err != nil {
+		return 0, err
+	}
+
+	checker := makePathChecker(file)
+	comparator := makePathComparator(file)
+	counter, getter := makeCounter(checker)
+
+	_, err = walkFilteredHistory(commit, counter, comparator)
+	if err != nil {
+		return 0, err
+	}
+
+	return getter(), nil
 }
 
 // used only for single tree, (]
@@ -273,15 +307,21 @@ func (repo *Repository) SearchCommits(commitId, keyword string) (*list.List, err
 
 	return repo.searchCommits(id, keyword)
 }
+
 func (repo *Repository) searchCommits(id sha1, keyword string) (*list.List, error) {
-	stdout, stderr, err := com.ExecCmdDirBytes(repo.Path, "git", "log", id.String(), "-100",
-		"-i", "--grep="+keyword, prettyLogFormat)
+	commit, err := repo.getCommit(id)
 	if err != nil {
 		return nil, err
-	} else if len(stderr) > 0 {
-		return nil, errors.New(string(stderr))
 	}
-	return parsePrettyFormatLog(repo, stdout)
+
+	searcher, err := makeHistorySearcher(keyword)
+	if err != nil {
+		return nil, err
+	}
+
+	pager := makePager(searcher, 0, ItemsPerSearch)
+
+	return walkHistory(commit, pager)
 }
 
 // GetCommitsByRange returns certain number of commits with given page of repository.
@@ -295,21 +335,41 @@ func (repo *Repository) CommitsByRange(commitId string, page int) (*list.List, e
 }
 
 func (repo *Repository) commitsByRange(id sha1, page int) (*list.List, error) {
-	stdout, stderr, err := com.ExecCmdDirBytes(repo.Path, "git", "log", id.String(),
-		"--skip="+IntToStr((page-1)*50), "--max-count=50", prettyLogFormat)
+	commit, err := repo.getCommit(id)
 	if err != nil {
-		return nil, errors.New(string(stderr))
+		return nil, err
 	}
-	return parsePrettyFormatLog(repo, stdout)
+
+	pager := makePager(nil, (page-1)*ItemsPerPage, ItemsPerPage)
+
+	return walkHistory(commit, pager)
 }
 
 func (repo *Repository) CommitsByFileAndRange(branch, file string, page int) (*list.List, error) {
-	stdout, stderr, err := com.ExecCmdDirBytes(repo.Path, "git", "log", branch,
-		"--skip="+IntToStr((page-1)*50), "--max-count=50", prettyLogFormat, "--", file)
+	strId, err := repo.GetCommitIdOfBranch(branch)
 	if err != nil {
-		return nil, errors.New(string(stderr))
+		return nil, err
 	}
-	return parsePrettyFormatLog(repo, stdout)
+
+	id, err := NewIdFromString(strId)
+	if err != nil {
+		return nil, err
+	}
+
+	return repo.commitsByFileAndRange(id, file, page)
+}
+
+func (repo *Repository) commitsByFileAndRange(id sha1, path string, page int) (*list.List, error) {
+	commit, err := repo.getCommit(id)
+	if err != nil {
+		return nil, err
+	}
+
+	checker := makePathChecker(path)
+	pager := makePager(checker, (page-1)*ItemsPerPage, ItemsPerPage)
+	comparator := makePathComparator(path)
+
+	return walkFilteredHistory(commit, pager, comparator)
 }
 
 func (repo *Repository) GetCommitOfRelPath(commitId, relPath string) (*Commit, error) {
@@ -321,16 +381,24 @@ func (repo *Repository) GetCommitOfRelPath(commitId, relPath string) (*Commit, e
 	return repo.getCommitOfRelPath(id, relPath)
 }
 
-func (repo *Repository) getCommitOfRelPath(id sha1, relPath string) (*Commit, error) {
-	stdout, _, err := com.ExecCmdDir(repo.Path, "git", "log", "-1", prettyLogFormat, id.String(), "--", relPath)
+func (repo *Repository) getCommitOfRelPath(id sha1, path string) (*Commit, error) {
+	commit, err := repo.getCommit(id)
 	if err != nil {
 		return nil, err
 	}
 
-	id, err = NewIdFromString(string(stdout))
+	checker := makePathChecker(path)
+	pager := makePager(checker, 0, 1)
+	comparator := makePathComparator(path)
+
+	res, err := walkFilteredHistory(commit, pager, comparator)
 	if err != nil {
 		return nil, err
 	}
 
-	return repo.getCommit(id)
+	if res.Len() == 0 {
+		return nil, nil
+	}
+
+	return res.Front().Value.(*Commit), nil
 }
