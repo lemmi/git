@@ -9,31 +9,37 @@ type HistoryWalkerAction int
 const (
 	// drop commit and do not follow parents
 	HWDrop HistoryWalkerAction = 0
-	// takes commit but not traverses parents
+	// take commit but not traverse parents
 	HWTakeCommit HistoryWalkerAction = 1 << iota
-	// drops commit but traverses parents
+	// drop commit but traverse parents
 	HWFollowParents
-	// stops traverse
+	// stop traverse
 	HWStop
 
-	// take and follow
+	// take commit and follow parents
 	HWTakeAndFollow = HWTakeCommit | HWFollowParents
 )
 
 type CommitWalkCallback func(*Commit) (HistoryWalkerAction, error)
 
-type CommitComparator func(left, right *Commit) bool
+// CommitComparator defines callback type for checking commit equalty. If it returns true then
+// commits are considered equal. See "History Simplification" chapter of git-log man for details
+type CommitComparator func(current, parent *Commit) bool
 
 func walkHistory(start *Commit, callback CommitWalkCallback) (*list.List, error) {
 	return walkHistoryLoop([]*Commit{start}, callback, commitRootComparator)
 }
 
-func walkFilteredHistory(start *Commit, callback CommitWalkCallback, eq CommitComparator) (*list.List, error) {
+func walkFilteredHistory(start *Commit, callback CommitWalkCallback,
+	eq CommitComparator) (*list.List, error) {
+
 	return walkHistoryLoop([]*Commit{start}, callback, eq)
 }
 
-// we gurantee that roots are not equal to each other
-func walkHistoryLoop(roots []*Commit, callback CommitWalkCallback, eq CommitComparator) (*list.List, error) {
+// roots must be not equal to each other
+func walkHistoryLoop(roots []*Commit, callback CommitWalkCallback,
+	eq CommitComparator) (*list.List, error) {
+
 	results := list.New()
 	seen := make(map[sha1]struct{})
 
@@ -92,6 +98,8 @@ func parents(commit *Commit) ([]*Commit, error) {
 	return parents, nil
 }
 
+// mergeRoots will merge two sets of commits and ensure that they are not equal to each other
+// the members of base and merging sets already nonequal to each other
 func mergeRoots(base, merging []*Commit, eq CommitComparator, seen map[sha1]struct{}) []*Commit {
 	newRoots := append([]*Commit(nil), base...)
 	for _, needle := range merging {
@@ -115,7 +123,12 @@ func mergeRoots(base, merging []*Commit, eq CommitComparator, seen map[sha1]stru
 	return newRoots
 }
 
-func skipEqualCommits(commit *Commit, eq CommitComparator, seen map[sha1]struct{}) (*Commit, error) {
+// skipEqualCommits compares commit to it parents. If it finds a parent
+// that equals to current commit the current commit will be dropped and parent will be followed
+// see "History Simplification" chapter of git-log man for full details.
+func skipEqualCommits(commit *Commit, eq CommitComparator,
+	seen map[sha1]struct{}) (*Commit, error) {
+
 	for {
 		// we already seen that commit, no point to traverse further
 		if _, ok := seen[commit.Id]; ok {
@@ -151,7 +164,9 @@ func skipEqualCommits(commit *Commit, eq CommitComparator, seen map[sha1]struct{
 	}
 }
 
-func simplifyRoots(roots []*Commit, eq CommitComparator, seen map[sha1]struct{}) ([]*Commit, error) {
+func simplifyRoots(roots []*Commit, eq CommitComparator,
+	seen map[sha1]struct{}) ([]*Commit, error) {
+
 	newRoots := []*Commit{}
 	for _, commit := range roots {
 		commit, err := skipEqualCommits(commit, eq, seen)
@@ -166,6 +181,7 @@ func simplifyRoots(roots []*Commit, eq CommitComparator, seen map[sha1]struct{})
 	return newRoots, nil
 }
 
+// extractNewestCommit will find newest commit, extract it and return resulting set
 func extractNewestCommit(roots []*Commit) (*Commit, []*Commit) {
 	if len(roots) == 1 {
 		return roots[0], roots[:0]
