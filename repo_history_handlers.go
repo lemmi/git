@@ -8,6 +8,10 @@ func commitRootComparator(current, parent *Commit) bool {
 	return current.TreeId().Equal(parent.TreeId())
 }
 
+func nopComparator(current, parent *Commit) bool {
+	return false
+}
+
 func makePathComparator(path string) CommitComparator {
 	return func(current, parent *Commit) bool {
 		centry, cerr := current.GetTreeEntryByPath(path)

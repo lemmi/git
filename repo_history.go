@@ -27,7 +27,7 @@ type CommitWalkCallback func(*Commit) (HistoryWalkerAction, error)
 type CommitComparator func(current, parent *Commit) bool
 
 func walkHistory(start *Commit, callback CommitWalkCallback) (*list.List, error) {
-	return walkHistoryLoop([]*Commit{start}, callback, commitRootComparator)
+	return walkHistoryLoop([]*Commit{start}, callback, nopComparator)
 }
 
 func walkFilteredHistory(start *Commit, callback CommitWalkCallback,
@@ -53,6 +53,10 @@ func walkHistoryLoop(roots []*Commit, callback CommitWalkCallback,
 		roots, err = simplifyRoots(roots, eq, seen)
 		if err != nil {
 			return nil, err
+		}
+
+		if len(roots) == 0 {
+			return results, nil
 		}
 
 		var next *Commit
@@ -107,8 +111,7 @@ func mergeRoots(base, merging []*Commit, eq CommitComparator, seen map[sha1]stru
 		for _, item := range base {
 			if eq(needle, item) {
 				// found equal commit in merging roots
-				// drop it and mark as seen
-				seen[needle.Id] = struct{}{}
+				// drop it
 				found = true
 				break
 			}
@@ -192,7 +195,7 @@ func extractNewestCommit(roots []*Commit) (*Commit, []*Commit) {
 	for idx, current := range roots[1:] {
 		if current.Committer.When.After(target.Committer.When) {
 			target = current
-			targetIdx = idx
+			targetIdx = idx + 1
 		}
 	}
 
