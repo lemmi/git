@@ -3,7 +3,7 @@ package git
 import (
 	"bytes"
 	"compress/zlib"
-	"crypto"
+	libsha1 "crypto/sha1"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -74,7 +74,7 @@ func StoreObjectSHA(
 		return [20]byte{}, err
 	}
 
-	hash := crypto.SHA1.New()
+	hash := libsha1.New()
 	reader = io.TeeReader(reader, hash)
 
 	if w == ioutil.Discard {
