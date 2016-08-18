@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"errors"
 	"io"
+	"io/ioutil"
 )
 
 var (
@@ -14,7 +15,7 @@ var (
 )
 
 type readCloser struct {
-	r io.Reader
+	r io.ReadCloser
 	c io.Closer
 }
 
@@ -23,11 +24,27 @@ func (o *readCloser) Read(p []byte) (n int, err error) {
 }
 
 func (o *readCloser) Close() error {
-	return o.c.Close()
+	errr := o.r.Close()
+	errc := o.c.Close()
+	if errr != nil && errc != nil {
+		// in case both fail, return the concatenated error
+		return errors.New(errr.Error() + ", " + errc.Error())
+	}
+	if errr != nil {
+		return errr
+	}
+	if errc != nil {
+		return errc
+	}
+	return nil
 }
 
-func newReadCloser(r io.Reader, c io.Closer) io.ReadCloser {
+func newReadCloser(r io.ReadCloser, c io.Closer) io.ReadCloser {
 	return &readCloser{r, c}
+}
+
+func wrapReadCloser(wrap io.Reader, rc io.ReadCloser) io.ReadCloser {
+	return newReadCloser(ioutil.NopCloser(wrap), rc)
 }
 
 type bufReadCloser struct {
@@ -74,13 +91,13 @@ func (o *readAter) ReadAt(p []byte, off int64) (n int, err error) {
 }
 
 // Read deflated object from the file.
-func readerDecompressed(r io.Reader, inflatedSize int64) (io.ReadCloser, error) {
+func readerDecompressed(r io.ReadCloser) (io.ReadCloser, error) {
 	zr, err := zlib.NewReader(r)
 	if err != nil {
 		return nil, err
 	}
 
-	return newReadCloser(io.LimitReader(zr, inflatedSize), zr), nil
+	return newReadCloser(zr, r), nil
 }
 
 // buf must be large enough to read the number.
