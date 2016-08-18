@@ -1,9 +1,10 @@
 package git
 
 import (
+	"bufio"
 	"bytes"
-	"compress/zlib"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -169,10 +170,11 @@ func readObjectBytes(path string, indexfiles *map[string]*idxFile, offset uint64
 			return
 		}
 
-		dataRc, err = readerDecompressed(file, length)
+		dataRc, err = readerDecompressed(file)
 		if err != nil {
 			return
 		}
+		dataRc = wrapReadCloser(io.LimitReader(dataRc, length), dataRc)
 		return
 		// data, err = readCompressedDataFromFile(file, offsetInt+pos, length)
 
@@ -230,7 +232,7 @@ func readObjectBytes(path string, indexfiles *map[string]*idxFile, offset uint64
 		return
 	}
 
-	rc, err := readerDecompressed(file, length)
+	rc, err := readerDecompressed(file)
 	if err != nil {
 		return
 	}
@@ -258,60 +260,39 @@ func readObjectBytes(path string, indexfiles *map[string]*idxFile, offset uint64
 	return
 }
 
-// Return length as integer from zero terminated string
-// and the beginning of the real object
-func getLengthZeroTerminated(b []byte) (int64, int64) {
-	i := 0
-	var pos int
-	for b[i] != 0 {
-		i++
-	}
-	pos = i
-	i--
-	var length int64
-	var pow int64
-	pow = 1
-	for i >= 0 {
-		length = length + (int64(b[i])-48)*pow
-		pow = pow * 10
-		i--
-	}
-	return length, int64(pos) + 1
-}
-
 // Read the contents of the object file at path.
 // Return the content type, the contents of the file and error, if any
 func readObjectFile(path string, sizeonly bool) (ot ObjectType, length int64, dataRc io.ReadCloser, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return
+		return 0, 0, nil, err
 	}
-
-	defer func() {
-		if err != nil || sizeonly {
-			if f != nil {
-				f.Close()
-			}
-		}
-	}()
-
-	r, err := zlib.NewReader(f)
+	dataRc, err = readerDecompressed(f)
 	if err != nil {
-		return
+		f.Close()
+		return 0, 0, nil, err
 	}
 
-	firstBufferSize := int64(1024)
+	// we need to buffer, otherwise Fscan can read too far
+	dataRc = wrapReadCloser(bufio.NewReader(dataRc), dataRc)
 
-	buf := make([]byte, firstBufferSize)
-	_, err = r.Read(buf)
+	var t string
+	_, err = fmt.Fscanf(dataRc, "%s %d\x00", &t, &length)
+
 	if err != nil {
-		return
+		dataRc.Close()
+		return 0, 0, nil, err
 	}
 
-	spacePos := int64(bytes.IndexByte(buf, ' '))
+	if length < 0 {
+		dataRc.Close()
+		return 0, 0, nil, errors.New(`Negitive length of object file`)
+	}
 
-	// "tree", "commit", "blob", ...
-	switch string(buf[:spacePos]) {
+	// now wrap in LimitedReader to not read over the end
+	dataRc = wrapReadCloser(io.LimitReader(dataRc, length), dataRc)
+
+	switch t {
 	case "blob":
 		ot = ObjectBlob
 	case "tree":
@@ -320,33 +301,15 @@ func readObjectFile(path string, sizeonly bool) (ot ObjectType, length int64, da
 		ot = ObjectCommit
 	case "tag":
 		ot = ObjectTag
+	default:
+		dataRc.Close()
+		return 0, 0, nil, fmt.Errorf(`Unknown object type: %q`, t)
 	}
-
-	// length starts at the position after the space
-	var objstart int64
-	length, objstart = getLengthZeroTerminated(buf[spacePos+1:])
 
 	if sizeonly {
-		return
+		dataRc.Close()
+		dataRc = nil
 	}
 
-	objstart += spacePos + 1
-
-	_, err = f.Seek(0, os.SEEK_SET)
-	if err != nil {
-		return
-	}
-
-	rc, err := readerDecompressed(f, length+objstart)
-	if err != nil {
-		return
-	}
-
-	_, err = io.Copy(ioutil.Discard, io.LimitReader(rc, objstart))
-	if err != nil {
-		return
-	}
-
-	dataRc = newReadCloser(io.LimitReader(rc, length), rc)
-	return
+	return ot, length, dataRc, nil
 }
