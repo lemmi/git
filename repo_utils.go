@@ -3,6 +3,8 @@ package git
 import (
 	"bufio"
 	"bytes"
+	csha1 "crypto/sha1"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -12,78 +14,164 @@ import (
 	"path/filepath"
 )
 
+func checkIdxVersion(r io.Reader, magic []byte, version uint32) error {
+	var buf [8]byte
+	n, err := io.ReadFull(r, buf[:])
+	if err != nil {
+		return err
+	}
+	if n < len(buf) {
+		return errors.New("Unexpected EOF")
+	}
+	if !bytes.Equal(magic, buf[:4]) {
+		return fmt.Errorf("Unknown magic byte %q, expected %q", buf[:4], magic)
+	}
+	if v := binary.BigEndian.Uint32(buf[4:]); v != version {
+		return fmt.Errorf("Not a version %d idx file %q", version, v)
+	}
+	return nil
+}
+
+func isIdxOffsetValue64(v uint32) (bool, uint32) {
+	// test wether MSB is set, return that and the other 31bits
+	return v&(1<<31) > 0, v &^ (1 << 31)
+}
+
 func readIdxFile(path string) (*idxFile, error) {
 	ifile := &idxFile{}
 	ifile.indexpath = path
 	ifile.packpath = path[0:len(path)-3] + "pack"
-	idx, err := ioutil.ReadFile(path)
+
+	idxf, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
+	defer idxf.Close()
 
-	if !bytes.HasPrefix(idx, []byte{255, 't', 'O', 'c'}) {
-		return nil, errors.New("Not version 2 index file")
+	// Simulataniously calculate the checksum
+	sha1sum := csha1.New()
+	idx := io.TeeReader(idxf, sha1sum)
+
+	// check magic byte and verion
+	// level 0
+	if err = checkIdxVersion(idx, []byte{255, 't', 'O', 'c'}, 2); err != nil {
+		return nil, err
 	}
-	pos := 8
-	var fanout [256]uint32
-	for i := 0; i < 256; i++ {
-		// TODO: use range
-		fanout[i] = uint32(idx[pos])<<24 + uint32(idx[pos+1])<<16 + uint32(idx[pos+2])<<8 + uint32(idx[pos+3])
-		pos += 4
+
+	// read the complete fanout table
+	// we only really use the last entry for the total number of entries
+	// since we are putting the hashes into a map
+	// level 1
+	fanout := make([]uint32, 256)
+	if err = binary.Read(idx, binary.BigEndian, fanout); err != nil {
+		return nil, err
 	}
-	numObjects := int(fanout[255])
+
+	// read in all hashes. hashes should be in sorted order
+	// level 2
+	numObjects := int64(fanout[255])
 	ids := make([]sha1, numObjects)
 
-	for i := 0; i < numObjects; i++ {
-		for j := 0; j < 20; j++ {
-			ids[i][j] = idx[pos+j]
+	for i := range ids {
+		// read the next sha1 hash
+		n, err := io.ReadFull(idx, ids[i][:])
+		if n < len(ids[i]) {
+			err = fmt.Errorf("Too short for sha1: %q", ids[i])
 		}
-		pos = pos + 20
+		if err != nil {
+			return nil, err
+		}
 	}
-	// skip crc32 and offsetValues4
-	pos += 8 * numObjects
 
-	excessLen := len(idx) - 258*4 - 28*numObjects - 40
-	var offsetValues8 []uint64
-	if excessLen > 0 {
-		// We have an index table, so let's read it first
-		offsetValues8 = make([]uint64, excessLen/8)
-		for i := 0; i < excessLen/8; i++ {
-			offsetValues8[i] = uint64(idx[pos])<<070 + uint64(idx[pos+1])<<060 + uint64(idx[pos+2])<<050 + uint64(idx[pos+3])<<040 + uint64(idx[pos+4])<<030 + uint64(idx[pos+5])<<020 + uint64(idx[pos+6])<<010 + uint64(idx[pos+7])
-			pos = pos + 8
-		}
+	// skip crc32 for now, only necessary for verifying the compressed
+	// level 3
+	if _, err := io.CopyN(ioutil.Discard, idx, 4*numObjects); err != nil {
+		return nil, err
 	}
+
+	// the final offsets
 	ifile.offsetValues = make(map[sha1]uint64, numObjects)
-	pos = 258*4 + 24*numObjects
-	for i := 0; i < numObjects; i++ {
-		offset := uint32(idx[pos])<<24 + uint32(idx[pos+1])<<16 + uint32(idx[pos+2])<<8 + uint32(idx[pos+3])
-		offset32ndbit := offset & 0x80000000
-		offset31bits := offset & 0x7FFFFFFF
-		if offset32ndbit == 0x80000000 {
-			// it's an index entry
-			ifile.offsetValues[ids[i]] = offsetValues8[offset31bits]
-		} else {
-			ifile.offsetValues[ids[i]] = uint64(offset31bits)
-		}
-		pos = pos + 4
+
+	// the short 31 bit offsets
+	// MSB signals whether to use the other 31 bit as offset into the
+	// packfile directly, or whether it's an index for the 64 bit
+	// offsets in large packfiles (level 5)
+	// level 4
+	offsetValues32 := make([]uint32, numObjects)
+
+	type link struct {
+		id     sha1   // temporarily hold the hash, so we don't have to look it up again
+		offset uint32 // offset into the 64 bit offset table
 	}
-	// sha1Packfile := idx[pos : pos+20]
-	// sha1Index := idx[pos+21 : pos+40]
+
+	// temporarily hold hash <-> 64bit table index
+	var idxOffsetValues64 []link
+
+	// read the offsets and split out the large offsets
+	for i := range offsetValues32 {
+		var ov uint32
+		if err != binary.Read(idx, binary.BigEndian, &ov) {
+			return nil, err
+		}
+		if ok, ov := isIdxOffsetValue64(ov); ok {
+			// MSB is set, This is an index into the 64 bit table.
+			idxOffsetValues64 = append(idxOffsetValues64, link{ids[i], ov})
+		} else {
+			// MSB not set. We can add this offset directly.
+			ifile.offsetValues[ids[i]] = uint64(ov)
+		}
+	}
+
+	// assume there are as many 64bit entries as there are large offsets
+	// level 5
+	offsetValues64 := make([]uint64, len(idxOffsetValues64))
+
+	// read in the complete table of large offsets
+	if err != binary.Read(idx, binary.BigEndian, offsetValues64) {
+		return nil, err
+	}
+
+	// look up the large offsets, put them into the map.
+	for _, iov := range idxOffsetValues64 {
+		if int(iov.offset) >= len(offsetValues64) {
+			return nil, errors.New("Unexpected large index to 64bit index table")
+		}
+		ifile.offsetValues[iov.id] = offsetValues64[iov.offset]
+	}
+
+	// This is the sha1 hash for the associated pack file
+	if _, err := io.CopyN(ioutil.Discard, idx, csha1.Size); err != nil {
+		return nil, err
+	}
+
+	// finalize the sha1 of the idx file
+	hashCalculated := sha1sum.Sum(nil)
+
+	// we don't need to write anymore
+	idx = nil
+	// read the hash from the end of the file
+
+	hashFile := make([]byte, csha1.Size)
+	if _, err = io.ReadFull(idxf, hashFile); err != nil {
+		return nil, err
+	}
+
+	if !bytes.Equal(hashFile, hashCalculated) {
+		return nil, fmt.Errorf(`Chacksum missmatch. Got "%x", expected "%x"`, hashCalculated, hashFile)
+	}
+
+	// Not sure whether this should be done here.
 	fi, err := os.Open(ifile.packpath)
 	if err != nil {
 		return nil, err
 	}
 	defer fi.Close()
 
-	packVersion := make([]byte, 8)
-	_, err = fi.Read(packVersion)
-	if err != nil {
+	if err = checkIdxVersion(fi, []byte("PACK"), 2); err != nil {
 		return nil, err
 	}
-	if !bytes.HasPrefix(packVersion, []byte{'P', 'A', 'C', 'K'}) {
-		return nil, errors.New("Pack file does not start with 'PACK'")
-	}
-	ifile.packversion = uint32(packVersion[4])<<24 + uint32(packVersion[5])<<16 + uint32(packVersion[6])<<8 + uint32(packVersion[7])
+
+	ifile.packversion = 2
 	return ifile, nil
 }
 
