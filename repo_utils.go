@@ -217,7 +217,7 @@ func readObjectBytes(path string, indexfiles *map[string]*idxFile, offset uint64
 		}
 	}()
 
-	pos, err := file.Seek(offsetInt, os.SEEK_SET)
+	pos, err := file.Seek(offsetInt, io.SeekStart)
 	if err != nil {
 		return
 	}
@@ -253,7 +253,7 @@ func readObjectBytes(path string, indexfiles *map[string]*idxFile, offset uint64
 			return
 		}
 
-		_, err = file.Seek(offsetInt+pos, os.SEEK_SET)
+		_, err = file.Seek(offsetInt+pos, io.SeekStart)
 		if err != nil {
 			return
 		}
@@ -315,7 +315,7 @@ func readObjectBytes(path string, indexfiles *map[string]*idxFile, offset uint64
 		return
 	}
 
-	_, err = file.Seek(offsetInt+pos, os.SEEK_SET)
+	_, err = file.Seek(offsetInt+pos, io.SeekStart)
 	if err != nil {
 		return
 	}

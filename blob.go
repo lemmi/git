@@ -36,21 +36,17 @@ func copyCompressed(w io.Writer, r io.Reader) error {
 	}
 
 	err = cw.Close()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 // Add '<type> <size>\x00' to beginning of `r`.
 func PrependObjectHeader(objectType ObjectType, r io.ReadSeeker) (io.Reader, error) {
-	size, err := r.Seek(0, os.SEEK_END)
+	size, err := r.Seek(0, io.SeekEnd)
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = r.Seek(0, os.SEEK_SET)
+	_, err = r.Seek(0, io.SeekStart)
 	if err != nil {
 		return nil, err
 	}
@@ -96,12 +92,12 @@ func (repo *Repository) HaveObjectFromReadSeeker(
 	objectType ObjectType,
 	r io.ReadSeeker,
 ) (found bool, id sha1, err error) {
-	initialPosition, err := r.Seek(0, os.SEEK_CUR)
+	initialPosition, err := r.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return false, [20]byte{}, err
 	}
 	defer func() {
-		_, err1 := r.Seek(initialPosition, os.SEEK_SET)
+		_, err1 := r.Seek(initialPosition, io.SeekStart)
 		if err == nil && err1 != nil {
 			err = err1 // If there was no other error, send the seek error.
 		}

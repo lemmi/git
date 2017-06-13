@@ -29,5 +29,5 @@ func StrToInt(str string) (int, error) {
 }
 
 func IntToStr(n int) string {
-	return strconv.FormatInt(int64(n), 10)
+	return strconv.Itoa(n)
 }
