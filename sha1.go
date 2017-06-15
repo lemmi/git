@@ -60,11 +60,7 @@ func IsSha1(sha1 string) bool {
 	}
 
 	_, err := hex.DecodeString(sha1)
-	if err != nil {
-		return false
-	}
-
-	return true
+	return err == nil
 }
 
 // Create a new sha1 from a Sha1 string of length 40.

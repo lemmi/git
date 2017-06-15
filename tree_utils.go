@@ -73,11 +73,7 @@ func (t *TreeScanner) Scan() bool {
 	}
 
 	t.err = t.parse()
-	if t.err != nil {
-		return false
-	}
-
-	return true
+	return t.err == nil
 }
 
 func (t *TreeScanner) Err() error {

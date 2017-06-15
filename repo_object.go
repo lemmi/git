@@ -1,7 +1,6 @@
 package git
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -78,7 +77,7 @@ func (repo *Repository) getRawObject(id sha1, metaOnly bool) (ObjectType, int64,
 		return 0, 0, nil, err
 
 	case !found:
-		return 0, 0, nil, errors.New(fmt.Sprintf("Object not found %s", sha1))
+		return 0, 0, nil, fmt.Errorf("Object not found %s", sha1)
 
 	case !packed:
 		return readObjectFile(filepathFromSHA1(repo.Path, sha1), metaOnly)
