@@ -96,10 +96,12 @@ func ScanTreeEntry(
 	const shaLen = 20
 
 	nullIndex := bytes.IndexByte(data, '\x00')
-	recordLength := nullIndex + 1 + shaLen
-	if recordLength <= len(data) {
-		// We found 20 bytes after a null, we're done.
-		return recordLength, data[:recordLength], nil
+	if nullIndex != -1 {
+		recordLength := nullIndex + 1 + shaLen
+		if recordLength <= len(data) {
+			// We found 20 bytes after a null, we're done.
+			return recordLength, data[:recordLength], nil
+		}
 	}
 
 	if atEOF {
